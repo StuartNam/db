@@ -21,19 +21,21 @@ PRIOR_LOSS_WEIGHT = 1
 TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/text_encoder/"
 UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 ### 1. Prepare components of StableDiffusionPipeline
 
 # - Tokenizer
 tokenizer = AutoTokenizer.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'tokenizer'
-)
+).to(device)
 
 # - Text encoder: Used to encode input prompt into embedding. We can keep it fix or fine-tune it along with unet
 text_encoder = CLIPTextModel.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'text_encoder'
-)
+).to(device)
 
 if not FINETUNE_TEXT_ENCODER:
     text_encoder.requires_grad_(False)
@@ -42,24 +44,25 @@ if not FINETUNE_TEXT_ENCODER:
 scheduler = DDPMScheduler.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'scheduler'
-)
+).to(device)
 
 # - Autoencoder: Used to encode images into latent space. Keep it fix!
 vae = AutoencoderKL.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'vae'
-)
+).to(device)
+
 vae.requires_grad_(False)
 
 # - Unet: Noise predictor. The heart of Diffusion-based generative models.
 unet = UNet2DConditionModel.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'unet'
-)
+).to(device)
 
 prior_model = StableDiffusionPipeline.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
-)
+).to(device)
 
 ### 2. Prepare datasets
 class LatentsDataset(Dataset):
@@ -167,14 +170,14 @@ unet_optimizer = torch.optim.AdamW(
     lr = LRATE,
     weight_decay = WEIGHT_DECAY,
     eps = 1e-8
-)
+).to(device)
 
 text_encoder_optimizer = torch.optim.AdamW(
     text_encoder.parameters(),
     lr = LRATE,
     weight_decay = WEIGHT_DECAY,
     eps = 1e-8
-) if FINETUNE_TEXT_ENCODER else None
+).to(device) if FINETUNE_TEXT_ENCODER else None
 
 # - Dataloader
 def collate_fn(batches):
@@ -213,6 +216,8 @@ def train(start_from_epoch_no):
         print()
         print(f"Start Epoch {epoch_no}")
         for batch_no, batch in tqdm.tqdm(enumerate(data_loader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
+            batch = batch.to(device)
+            
             encoded_instance_prompt = text_encoder(batch['instance_prompt_ids'])[0]
 
             x0s = batch['latents']
