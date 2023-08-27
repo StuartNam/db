@@ -9,6 +9,7 @@ import torchvision.transforms as transforms
 import random
 import torch.nn.functional as F 
 
+# Argument list
 FINETUNE_TEXT_ENCODER = True
 PRETRAINED_MODEL_NAME = 'stabilityai/stable-diffusion-2-1-base'
 INSTANCE_FOLDER_PATH = './data/valid/instances/'
@@ -20,20 +21,70 @@ NUM_EPOCHS = 50
 PRIOR_LOSS_WEIGHT = 1
 TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/text_encoder/"
 UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
+START_FROM_EPOCH_NO = 0
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Device: {device}")
 
 ### 1. Prepare components of StableDiffusionPipeline
 
+# - Make 'model' dir to save checkpoints if not existed yet
+print(f"Creating 'model' dir for saving checkpoints")
+
+def make_structured_dir(root_path, structured_dir_info):
+    """
+        1. Args:
+        - root_path: str
+            A path where the dir should be created
+
+        - structured_dir_info: dict
+            Represents the structure of the dir
+    """
+
+    for dir, sub_dir in structured_dir_info.items():
+        dir_path = os.path.join(root_path, dir)
+        os.makedirs(dir_path, exist_ok = True)
+        make_structured_dir(dir_path, sub_dir)
+
+dir_info = {
+    'model': {
+        'checkpoints': {
+            'text_encoder': {},
+            'unet': {}
+        }
+    }
+}
+
+make_structured_dir('./', dir_info)
+
+# - Get suitable checkpoints for checkpoint training
+print(f"Preparing pipeline ...")
+
+def get_appropriate_pretrained(start_from_epoch_no):
+    if start_from_epoch_no == 0:
+        return PRETRAINED_MODEL_NAME
+    
+    needed_checkpoint = f'checkpoint-{start_from_epoch_no}'
+    checkpoints = os.listdir('./model/checkpoints/text_encoder/')
+    if needed_checkpoint not in checkpoints:
+        raise RuntimeError(f"get_appropriate_pretrained(): checkpoint-{start_from_epoch_no} doesnot exist")
+    
+    return './model/checkpoints/'
+
+pretrained_model = get_appropriate_pretrained(START_FROM_EPOCH_NO)
+
 # - Tokenizer
+print(f"- Loading <tokenizer> from {PRETRAINED_MODEL_NAME}")
 tokenizer = AutoTokenizer.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'tokenizer'
 )
 
 # - Text encoder: Used to encode input prompt into embedding. We can keep it fix or fine-tune it along with unet
+print(f"- Loading <text_encoder> from '{pretrained_model}'")
+
 text_encoder = CLIPTextModel.from_pretrained(
-    pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
+    pretrained_model_name_or_path = pretrained_model,
     subfolder = 'text_encoder'
 ).to(device)
 
@@ -41,12 +92,16 @@ if not FINETUNE_TEXT_ENCODER:
     text_encoder.requires_grad_(False)
 
 # - Scheduler
+print(f"- Loading <scheduler> from '{PRETRAINED_MODEL_NAME}', subfolder 'scheduler'")
+
 scheduler = DDPMScheduler.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'scheduler'
-).to(device)
+)
 
 # - Autoencoder: Used to encode images into latent space. Keep it fix!
+print(f"- Loading <vae> from '{PRETRAINED_MODEL_NAME}', subfolder 'vae'")
+
 vae = AutoencoderKL.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'vae'
@@ -55,14 +110,20 @@ vae = AutoencoderKL.from_pretrained(
 vae.requires_grad_(False)
 
 # - Unet: Noise predictor. The heart of Diffusion-based generative models.
+print(f"- Loading <unet> from '{pretrained_model}', subfolder 'unet'")
+
 unet = UNet2DConditionModel.from_pretrained(
-    pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
+    pretrained_model_name_or_path = pretrained_model,
     subfolder = 'unet'
 ).to(device)
+
+# - Prior model: This is the whole SD Pipeline. Used to generate prior class images for prior preservation training
+print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
 
 prior_model = StableDiffusionPipeline.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
 ).to(device)
+
 
 ### 2. Prepare datasets
 class LatentsDataset(Dataset):
@@ -170,14 +231,14 @@ unet_optimizer = torch.optim.AdamW(
     lr = LRATE,
     weight_decay = WEIGHT_DECAY,
     eps = 1e-8
-).to(device)
+)
 
 text_encoder_optimizer = torch.optim.AdamW(
     text_encoder.parameters(),
     lr = LRATE,
     weight_decay = WEIGHT_DECAY,
     eps = 1e-8
-).to(device) if FINETUNE_TEXT_ENCODER else None
+)if FINETUNE_TEXT_ENCODER else None
 
 # - Dataloader
 def collate_fn(batches):
@@ -206,77 +267,104 @@ data_loader = DataLoader(
 )
 
 ### 4. Train
+"""
+    Train DreamBooth for a personalized Stable Diffusion
 
-# Steps to train:
-# 1. Get noisy latent vector using <scheduler>
-# 2. Predict the noise added using <unet>
+    1. Args:
+    - start_from_epoch_no:
+        A number corresponding to a saved checkpoint. Training will start from that checkpoint.
 
-def train(start_from_epoch_no): 
-    for epoch_no in tqdm.tqdm(range(start_from_epoch_no, NUM_EPOCHS), desc = "Training process", unit = ' epoch'):
-        print()
-        print(f"Start Epoch {epoch_no}")
-        for batch_no, batch in tqdm.tqdm(enumerate(data_loader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
-            batch = batch.to(device)
-            
-            encoded_instance_prompt = text_encoder(batch['instance_prompt_ids'])[0]
+    2. Steps:
+        2.1. Encode <instance_prompt_ids>
+        2.2. Sample <timesteps>
+        2.2. For <latents: x0s> and <prior_latents: prior_x0s> :
+            - Sample <epss>
+            - Sample <xTs>
+            - Get <predicted_epss> by forwarding through <unet>
+            - Compute loss
+        2.3. Compute loss by adding <instance_loss> and weighted <prior_loss>
+        2.4. loss.backward() and optimizer.step()
+"""
 
-            x0s = batch['latents']
-            
-            # - Sample white noise <epss> to add to x0
-            epss = torch.randn_like(
-                input = x0s,
-                dtype = x0s.dtype,
-                device = x0s.device
-            )
+# Set up
+text_encoder.train()
+unet.train()
 
-            # - Sample <timesteps> T randomly
-            ### Warning: <low> maybe 0
-            ### 
-            ###
-            timesteps = torch.randint(
-                low = 1,
-                high = scheduler.config.num_train_timesteps,
-                size = (x0s.shape[0], ),
-                dtype = torch.long,
-                device = x0s.device
-            )
+# Train loop
 
-            xTs = scheduler.add_noise(x0s, epss, timesteps)
-            predicted_epss = unet(xTs, timesteps, encoded_instance_prompt).sample
-            instance_loss = F.mse_loss(predicted_epss, epss)
-            
-            prior_x0s = batch['prior_latents']
+for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Training process", unit = ' epoch'):
+    print()
+    print(f"Start Epoch {epoch_no}")
+    
+    # Epoch loop
+    for batch_no, batch in tqdm.tqdm(enumerate(data_loader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
+        instance_prompt_ids = batch['instance_prompt_ids'].to(device)
+        prior_class_prompt_ids = batch['prior_class_prompt_ids'].to(device)
+        latents = batch['latents'].to(device)
+        prior_latents = batch['prior_latents'].to(device)
 
-            encoded_prior_class_prompt = text_encoder(batch['instance_prompt_ids'])[0]
+        encoded_instance_prompt = text_encoder(instance_prompt_ids)[0]
 
-            prior_epss = torch.randn_like(
-                input = prior_x0s,
-                dtype = prior_x0s.dtype,
-                device = prior_x0s.device
-            )
+        x0s = latents
+        
+        # - Sample white noise <epss> to add to x0
+        epss = torch.randn_like(
+            input = x0s,
+            dtype = x0s.dtype,
+            device = x0s.device
+        )
 
-            prior_xTs = scheduler.add_noise(prior_x0s, prior_epss, timesteps)
-            predicted_prior_epss = unet(prior_xTs, timesteps, encoded_prior_class_prompt).sample
-            prior_loss = F.mse_loss(predicted_prior_epss, prior_epss)
+        # - Sample <timesteps> T randomly
+        ### Warning: <low> maybe 0
+        ### 
+        ###
+        timesteps = torch.randint(
+            low = 1,
+            high = scheduler.config.num_train_timesteps,
+            size = (x0s.shape[0], ),
+            dtype = torch.long,
+            device = x0s.device
+        )
 
-            loss = instance_loss + PRIOR_LOSS_WEIGHT * prior_loss
+        xTs = scheduler.add_noise(x0s, epss, timesteps)
+        predicted_epss = unet(xTs, timesteps, encoded_instance_prompt).sample
+        instance_loss = F.mse_loss(predicted_epss, epss)
+        
+        prior_x0s = prior_latents
 
-            text_encoder_optimizer.zero_grad()
-            unet_optimizer.zero_grad()
+        encoded_prior_class_prompt = text_encoder(prior_class_prompt_ids)[0]
 
-            loss.backward()
+        prior_epss = torch.randn_like(
+            input = prior_x0s,
+            dtype = prior_x0s.dtype,
+            device = prior_x0s.device
+        )
 
-            text_encoder_optimizer.step()
-            unet_optimizer.step()
+        prior_xTs = scheduler.add_noise(prior_x0s, prior_epss, timesteps)
+        predicted_prior_epss = unet(prior_xTs, timesteps, encoded_prior_class_prompt).sample
+        prior_loss = F.mse_loss(predicted_prior_epss, prior_epss)
 
-            if batch_no % 100 == 0:
-                print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
+        loss = instance_loss + PRIOR_LOSS_WEIGHT * prior_loss
 
-        if (epoch_no + 1) % 50 == 0:
-            text_encoder.save_pretrained(TEXT_ENCODER_CHECKPOINT_FOLDER_PATH)
-            unet.save_pretrained(UNET_CHECKPOINT_FOLDER_PATH)
+        text_encoder_optimizer.zero_grad()
+        unet_optimizer.zero_grad()
 
-train(start_from_epoch_no = 0)
+        loss.backward()
+
+        text_encoder_optimizer.step()
+        unet_optimizer.step()
+
+        if batch_no % 100 == 0:
+            print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
+
+    # Handle checkpoint saving
+    if (epoch_no + 1) % 50 == 0:
+        checkpoints_folder_path = './model/checkpoints/'
+        text_encoder_checkpoint_path = os.path.join(checkpoints_folder_path, f'text_encoder/checkpoint-{epoch_no + 1}')
+        unet_checkpoint_path = os.path.join(checkpoints_folder_path, f'unet/checkpoint-{epoch_no + 1}')
+
+        text_encoder.save_pretrained(text_encoder_checkpoint_path)
+        unet.save_pretrained(unet_checkpoint_path)
 
 if __name__ == "__main__":
     pass
