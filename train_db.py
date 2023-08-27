@@ -29,7 +29,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 tokenizer = AutoTokenizer.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'tokenizer'
-).to(device)
+)
 
 # - Text encoder: Used to encode input prompt into embedding. We can keep it fix or fine-tune it along with unet
 text_encoder = CLIPTextModel.from_pretrained(
@@ -76,14 +76,14 @@ class LatentsDataset(Dataset):
 
         image_encoder.eval()
 
-        print("Preparing dataset")
-        print("- Load tokenizer")
+        print("Preparing dataset ...")
+        print("- Loading tokenizer")
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
             subfolder = 'tokenizer'
         )
 
-        print("- Tokenize <instance_prompt>")
+        print("- Tokenizing <instance_prompt>")
         self.instance_prompt = instance_prompt
 
         self.instance_prompt_ids = tokenizer(
@@ -92,7 +92,7 @@ class LatentsDataset(Dataset):
             padding = "max_length",
             max_length = tokenizer.model_max_length,
             return_tensors = "pt",
-        ).input_ids
+        ).to(device).input_ids
 
         pre_process = transforms.Compose(
             [
@@ -102,7 +102,7 @@ class LatentsDataset(Dataset):
             ]
         )
 
-        print("- Load instances")
+        print("- Loading instances")
         instances = []
         files = os.listdir(instances_folder_path)
         for file in files:
@@ -113,14 +113,14 @@ class LatentsDataset(Dataset):
         self.instances = instances
         self.num_instances = len(self.instances)
 
-        print("- Encode instances to latent space")
+        print("- Encoding instances to latent space")
         with torch.no_grad():
             self.latent_dists = [image_encoder.encode(instance.unsqueeze(0)).latent_dist for instance in self.instances]
         
         
         self.prior_class_prompt = get_prior_class_prompt(instance_prompt, 'sks')
         
-        print("- Tokenize <prior_class_prompt>")
+        print("- Tokenizing <prior_class_prompt>")
         self.prior_class_prompt_ids = tokenizer(
             self.prior_class_prompt,
             truncation = True,
@@ -129,7 +129,7 @@ class LatentsDataset(Dataset):
             return_tensors = "pt",
         ).input_ids
 
-        print("- Generate and encode prior_class_instances to latent space for prior preservation training")
+        print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         NUM_PRIOR_IMAGES = 1
         prior_class_images = prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 15).images
         prior_class_images[0].show()
