@@ -13,7 +13,7 @@ import torch.nn.functional as F
 FINETUNE_TEXT_ENCODER = True
 PRETRAINED_MODEL_NAME = 'stabilityai/stable-diffusion-2-1-base'
 INSTANCE_FOLDER_PATH = './data/valid/instances/'
-PROMPT = 'A portrait of a sks person'
+PROMPT = 'A photo of a sks person\'s face'
 LRATE = 5e-6
 WEIGHT_DECAY = 0
 EPSILON = 0
@@ -22,7 +22,7 @@ PRIOR_LOSS_WEIGHT = 1
 TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/text_encoder/"
 UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
 START_FROM_EPOCH_NO = 0
-
+BATCH_SIZE = 2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Device: {device}")
 
@@ -169,7 +169,8 @@ class LatentsDataset(Dataset):
         for file in files:
             file_path = os.path.join(instances_folder_path, file)
             image = Image.open(file_path)
-            instances.append(pre_process(image))
+            processed_image = pre_process(image).to(device)
+            instances.append(processed_image)
 
         self.instances = instances
         self.num_instances = len(self.instances)
@@ -193,9 +194,9 @@ class LatentsDataset(Dataset):
         print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         NUM_PRIOR_IMAGES = 1
         prior_class_images = prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 15).images
-        prior_class_images[0].show()
+        # prior_class_images[0].show()
 
-        self.prior_class_instances = [pre_process(image) for image in prior_class_images]
+        self.prior_class_instances = [pre_process(image).to(device) for image in prior_class_images]
         with torch.no_grad():
             self.prior_latent_dicts = [image_encoder.encode(instance.unsqueeze(0)).latent_dist for instance in self.prior_class_instances]
 
@@ -304,7 +305,7 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
         prior_latents = batch['prior_latents'].to(device)
 
         encoded_instance_prompt = text_encoder(instance_prompt_ids)[0]
-
+        encoded_instance_prompts = torch.cat([encoded_instance_prompt] * BATCH_SIZE, dim = 0)
         x0s = latents
         
         # - Sample white noise <epss> to add to x0
@@ -327,12 +328,14 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
         )
 
         xTs = scheduler.add_noise(x0s, epss, timesteps)
-        predicted_epss = unet(xTs, timesteps, encoded_instance_prompt).sample
+        print(batch_no, xTs.shape, timesteps.shape, encoded_instance_prompts.shape)
+        predicted_epss = unet(xTs, timesteps, encoded_instance_prompts).sample
         instance_loss = F.mse_loss(predicted_epss, epss)
         
         prior_x0s = prior_latents
 
         encoded_prior_class_prompt = text_encoder(prior_class_prompt_ids)[0]
+        encoded_instance_prompts = torch.cat([encoded_prior_class_prompt] * BATCH_SIZE, dim = 0)
 
         prior_epss = torch.randn_like(
             input = prior_x0s,
