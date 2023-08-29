@@ -12,15 +12,15 @@ import torch.nn.functional as F
 # Argument list
 FINETUNE_TEXT_ENCODER = True
 PRETRAINED_MODEL_NAME = 'stabilityai/stable-diffusion-2-1-base'
-INSTANCE_FOLDER_PATH = './data/valid/instances/'
+INSTANCE_FOLDER_PATH = './db/data/valid/instances/'
 PROMPT = 'A photo of a sks person\'s face'
 LRATE = 5e-6
 WEIGHT_DECAY = 0
 EPSILON = 0
 NUM_EPOCHS = 50
 PRIOR_LOSS_WEIGHT = 1
-TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/text_encoder/"
-UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
+TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./db/model/checkpoints/text_encoder/"
+UNET_CHECKPOINT_FOLDER_PATH = "./db/model/checkpoints/unet/"
 START_FROM_EPOCH_NO = 0
 BATCH_SIZE = 2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -65,11 +65,11 @@ def get_appropriate_pretrained(start_from_epoch_no):
         return PRETRAINED_MODEL_NAME
     
     needed_checkpoint = f'checkpoint-{start_from_epoch_no}'
-    checkpoints = os.listdir('./model/checkpoints/text_encoder/')
+    checkpoints = os.listdir('./db/model/checkpoints/text_encoder/')
     if needed_checkpoint not in checkpoints:
         raise RuntimeError(f"get_appropriate_pretrained(): checkpoint-{start_from_epoch_no} doesnot exist")
     
-    return './model/checkpoints/'
+    return './db/model/checkpoints/'
 
 pretrained_model = get_appropriate_pretrained(START_FROM_EPOCH_NO)
 
@@ -362,7 +362,7 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
 
     # Handle checkpoint saving
     if (epoch_no + 1) % 50 == 0:
-        checkpoints_folder_path = './model/checkpoints/'
+        checkpoints_folder_path = './db/model/checkpoints/'
         text_encoder_checkpoint_path = os.path.join(checkpoints_folder_path, f'text_encoder/checkpoint-{epoch_no + 1}')
         unet_checkpoint_path = os.path.join(checkpoints_folder_path, f'unet/checkpoint-{epoch_no + 1}')
 
