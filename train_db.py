@@ -194,7 +194,7 @@ class LatentsDataset(Dataset):
         print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         NUM_PRIOR_IMAGES = 1
         prior_class_images = prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 15).images
-        # prior_class_images[0].show()
+        prior_class_images[0].show()
 
         self.prior_class_instances = [pre_process(image).to(device) for image in prior_class_images]
         with torch.no_grad():
@@ -262,7 +262,7 @@ def collate_fn(batches):
     
 data_loader = DataLoader(
     dataset = dataset,
-    batch_size = 2,
+    batch_size = BATCH_SIZE,
     shuffle = False,
     collate_fn = lambda batches: collate_fn(batches)
 )
@@ -305,7 +305,7 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
         prior_latents = batch['prior_latents'].to(device)
 
         encoded_instance_prompt = text_encoder(instance_prompt_ids)[0]
-        encoded_instance_prompts = torch.cat([encoded_instance_prompt] * BATCH_SIZE, dim = 0)
+        encoded_instance_prompts = torch.cat([encoded_instance_prompt] * latents.shape[0], dim = 0)
         x0s = latents
         
         # - Sample white noise <epss> to add to x0
