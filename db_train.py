@@ -17,12 +17,13 @@ PROMPT = 'A photo of a sks person\'s face'
 LRATE = 5e-6
 WEIGHT_DECAY = 0
 EPSILON = 0
-NUM_EPOCHS = 50
+NUM_EPOCHS = 1000
 PRIOR_LOSS_WEIGHT = 1
 TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/text_encoder/"
 UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
 START_FROM_EPOCH_NO = 0
 BATCH_SIZE = 1
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"main(): Device: {device}")
 
@@ -250,10 +251,10 @@ class LatentsDataset(Dataset):
 
         print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         prior_class_images = []
-        NUM_PRIOR_IMAGES = 20
+        NUM_PRIOR_IMAGES = 1
         for i in range(NUM_PRIOR_IMAGES):
-            prior_class_images += prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 30).images
-        prior_class_images[0].show()
+            prior_class_images += prior_model([self.prior_class_prompt], num_inference_steps = 10).images
+        #prior_class_images[0].show()
 
         self.prior_class_instances = [pre_process(image).to(device) for image in prior_class_images]
         with torch.no_grad():
@@ -417,7 +418,7 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
             print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
 
     # Handle checkpoint saving
-    if (epoch_no + 1) % 300 == 0:
+    if (epoch_no + 1) % 250 == 0:
         checkpoints_folder_path = './model/checkpoints/'
         text_encoder_checkpoint_path = os.path.join(checkpoints_folder_path, f'text_encoder/checkpoint-{epoch_no + 1}')
         unet_checkpoint_path = os.path.join(checkpoints_folder_path, f'unet/checkpoint-{epoch_no + 1}')
