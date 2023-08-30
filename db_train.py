@@ -2,7 +2,7 @@ import torch
 import tqdm
 from torch.utils.data import Dataset, DataLoader
 from diffusers import DDPMScheduler, AutoencoderKL, UNet2DConditionModel, StableDiffusionPipeline
-from transformers import CLIPTextModel, AutoTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer
 import os
 from PIL import Image
 import torchvision.transforms as transforms
@@ -136,7 +136,7 @@ pretrained_model = get_appropriate_pretrained(START_FROM_EPOCH_NO)
 
 # - Tokenizer
 print(f"- Loading <tokenizer> from {PRETRAINED_MODEL_NAME}")
-tokenizer = AutoTokenizer.from_pretrained(
+tokenizer = CLIPTokenizer.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'tokenizer'
 )
@@ -196,7 +196,7 @@ class LatentsDataset(Dataset):
 
         print("LatentsDataset.__init__(): Preparing dataset ...")
         print("- Loading tokenizer")
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = CLIPTokenizer.from_pretrained(
             pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
             subfolder = 'tokenizer'
         )
@@ -249,9 +249,11 @@ class LatentsDataset(Dataset):
         ).input_ids
 
         print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
-        NUM_PRIOR_IMAGES = 1
-        prior_class_images = prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 5).images
-        # prior_class_images[0].show()
+        prior_class_images = []
+        NUM_PRIOR_IMAGES = 20
+        for i in range(NUM_PRIOR_IMAGES):
+            prior_class_images += prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 30).images
+        prior_class_images[0].show()
 
         self.prior_class_instances = [pre_process(image).to(device) for image in prior_class_images]
         with torch.no_grad():
@@ -411,11 +413,11 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
         text_encoder_optimizer.step()
         unet_optimizer.step()
 
-        if batch_no % 100 == 0:
+        if batch_no % 3 == 0:
             print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
 
     # Handle checkpoint saving
-    if (epoch_no + 1) % 50 == 0:
+    if (epoch_no + 1) % 300 == 0:
         checkpoints_folder_path = './model/checkpoints/'
         text_encoder_checkpoint_path = os.path.join(checkpoints_folder_path, f'text_encoder/checkpoint-{epoch_no + 1}')
         unet_checkpoint_path = os.path.join(checkpoints_folder_path, f'unet/checkpoint-{epoch_no + 1}')
