@@ -12,24 +12,62 @@ import torch.nn.functional as F
 # Argument list
 FINETUNE_TEXT_ENCODER = True
 PRETRAINED_MODEL_NAME = 'stabilityai/stable-diffusion-2-1-base'
-INSTANCE_FOLDER_PATH = './db/data/valid/instances/'
+INSTANCE_FOLDER_PATH = './data/valid/instances/'
 PROMPT = 'A photo of a sks person\'s face'
 LRATE = 5e-6
 WEIGHT_DECAY = 0
 EPSILON = 0
 NUM_EPOCHS = 50
 PRIOR_LOSS_WEIGHT = 1
-TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./db/model/checkpoints/text_encoder/"
-UNET_CHECKPOINT_FOLDER_PATH = "./db/model/checkpoints/unet/"
+TEXT_ENCODER_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/text_encoder/"
+UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
 START_FROM_EPOCH_NO = 0
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f"Device: {device}")
+print(f"main(): Device: {device}")
 
-### 1. Prepare components of StableDiffusionPipeline
+"""
+    1. Setting up: 
+    1.1. Prepare the folders if not yet done for training and inference, including:
+    - './model/...':
+        Used to store the saved checkpoints
+    
+    - './data/...':
+        Used to store the data for training
 
-# - Make 'model' dir to save checkpoints if not existed yet
-print(f"Creating 'model' dir for saving checkpoints")
+    1.2. Prepare the components of Stable Diffusion, including:
+    - Fixed components:
+        . Tokenizer: 
+            Used to tokenize input prompts for conditioning
+
+        . Scheduler:
+            Used to produce a noise schedule for fast inference
+
+        . Autoencoder:
+            Used to encode input images into latent space as latent vectors
+
+        . Whole pipeline:
+            Used to generate prior class samples for prior preservation training
+
+    - Going-to-be-trained components:
+        . UNet:
+            Used to denoise the images followed the scheduler
+
+        . Text encoder:
+            Used to encode tokenized input prompts into embedding vectors
+    
+    1.3. Prepare dataset
+
+    1.4. Prepare training components, including:
+    - DataLoader
+    - Text_encoder and UNet optimizers
+    - Accelerator:
+        Used to ...
+"""
+
+# 1.
+# 1.1.
+print(f"main(): Creating './model/...' for saving checkpoints ...")
 
 def make_structured_dir(root_path, structured_dir_info):
     """
@@ -46,7 +84,7 @@ def make_structured_dir(root_path, structured_dir_info):
         os.makedirs(dir_path, exist_ok = True)
         make_structured_dir(dir_path, sub_dir)
 
-dir_info = {
+model_dir_info = {
     'model': {
         'checkpoints': {
             'text_encoder': {},
@@ -55,21 +93,44 @@ dir_info = {
     }
 }
 
-make_structured_dir('./', dir_info)
+make_structured_dir(
+    root_path = './',
+    structured_dir_info = model_dir_info
+)
 
-# - Get suitable checkpoints for checkpoint training
-print(f"Preparing pipeline ...")
+print(f"main(): Creating './data/...' for storing data ...")
+
+data_dir_info = {
+    'data': {
+        'valid': {
+            'instances': {},
+            'prior_class_instances': {}
+        },
+        'invalid': {}
+    }
+}
+
+make_structured_dir(
+    root_path = './',
+    structured_dir_info = data_dir_info
+)
+
+print(f"    - Note: Put your instances into './data/valid/instances/' for training if you haven't. The invalid ones will be moved to './data/invalid/' automatically.")
+print()
+
+# 1.2. 
+print(f"main(): Preparing pipeline ...")
 
 def get_appropriate_pretrained(start_from_epoch_no):
     if start_from_epoch_no == 0:
         return PRETRAINED_MODEL_NAME
     
     needed_checkpoint = f'checkpoint-{start_from_epoch_no}'
-    checkpoints = os.listdir('./db/model/checkpoints/text_encoder/')
+    checkpoints = os.listdir('./model/checkpoints/text_encoder/')
     if needed_checkpoint not in checkpoints:
         raise RuntimeError(f"get_appropriate_pretrained(): checkpoint-{start_from_epoch_no} doesnot exist")
     
-    return './db/model/checkpoints/'
+    return os.path.join('./model/checkpoints/', needed_checkpoint)
 
 pretrained_model = get_appropriate_pretrained(START_FROM_EPOCH_NO)
 
@@ -80,28 +141,15 @@ tokenizer = AutoTokenizer.from_pretrained(
     subfolder = 'tokenizer'
 )
 
-# - Text encoder: Used to encode input prompt into embedding. We can keep it fix or fine-tune it along with unet
-print(f"- Loading <text_encoder> from '{pretrained_model}'")
-
-text_encoder = CLIPTextModel.from_pretrained(
-    pretrained_model_name_or_path = pretrained_model,
-    subfolder = 'text_encoder'
-).to(device)
-
-if not FINETUNE_TEXT_ENCODER:
-    text_encoder.requires_grad_(False)
-
 # - Scheduler
 print(f"- Loading <scheduler> from '{PRETRAINED_MODEL_NAME}', subfolder 'scheduler'")
-
 scheduler = DDPMScheduler.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'scheduler'
 )
 
-# - Autoencoder: Used to encode images into latent space. Keep it fix!
+# - Autoencoder
 print(f"- Loading <vae> from '{PRETRAINED_MODEL_NAME}', subfolder 'vae'")
-
 vae = AutoencoderKL.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'vae'
@@ -109,23 +157,32 @@ vae = AutoencoderKL.from_pretrained(
 
 vae.requires_grad_(False)
 
-# - Unet: Noise predictor. The heart of Diffusion-based generative models.
-print(f"- Loading <unet> from '{pretrained_model}', subfolder 'unet'")
+# - Whole pipeline as a prior model
+print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
+prior_model = StableDiffusionPipeline.from_pretrained(
+    pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
+).to(device)
 
+# - Text encoder: 
+print(f"- Loading <text_encoder> from '{pretrained_model}'")
+text_encoder = CLIPTextModel.from_pretrained(
+    pretrained_model_name_or_path = pretrained_model,
+    subfolder = 'text_encoder'
+).to(device)
+
+# if not FINETUNE_TEXT_ENCODER:
+#     text_encoder.requires_grad_(False)
+
+# - UNet
+print(f"- Loading <unet> from '{pretrained_model}', subfolder 'unet'")
 unet = UNet2DConditionModel.from_pretrained(
     pretrained_model_name_or_path = pretrained_model,
     subfolder = 'unet'
 ).to(device)
 
-# - Prior model: This is the whole SD Pipeline. Used to generate prior class images for prior preservation training
-print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
+# 1.3.
+from torch.utils.data import Dataset
 
-prior_model = StableDiffusionPipeline.from_pretrained(
-    pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
-).to(device)
-
-
-### 2. Prepare datasets
 class LatentsDataset(Dataset):
     def __init__(self, instances_folder_path, instance_prompt, prior_model, image_encoder, size):
         def get_prior_class_prompt(instance_prompt, identifier):
@@ -137,7 +194,7 @@ class LatentsDataset(Dataset):
 
         image_encoder.eval()
 
-        print("Preparing dataset ...")
+        print("LatentsDataset.__init__(): Preparing dataset ...")
         print("- Loading tokenizer")
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
@@ -193,8 +250,8 @@ class LatentsDataset(Dataset):
 
         print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         NUM_PRIOR_IMAGES = 1
-        prior_class_images = prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 15).images
-        prior_class_images[0].show()
+        prior_class_images = prior_model([self.prior_class_prompt] * NUM_PRIOR_IMAGES, num_inference_steps = 5).images
+        # prior_class_images[0].show()
 
         self.prior_class_instances = [pre_process(image).to(device) for image in prior_class_images]
         with torch.no_grad():
@@ -223,25 +280,27 @@ dataset = LatentsDataset(
     size = 512
 )
 
-### 3. Prepare training components
+# 1.4.
 
-# - Optimizer(s): Unet optimizer and Text encoder optimizer if we are training Text encoder along with
-
-unet_optimizer = torch.optim.AdamW(
+# - Optimizers
+from torch.optim import AdamW
+unet_optimizer = AdamW(
     unet.parameters(),
     lr = LRATE,
     weight_decay = WEIGHT_DECAY,
     eps = 1e-8
 )
 
-text_encoder_optimizer = torch.optim.AdamW(
+text_encoder_optimizer = AdamW(
     text_encoder.parameters(),
     lr = LRATE,
     weight_decay = WEIGHT_DECAY,
     eps = 1e-8
-)if FINETUNE_TEXT_ENCODER else None
+) # if FINETUNE_TEXT_ENCODER else None
 
-# - Dataloader
+# - DataLoader
+from torch.utils.data import DataLoader
+
 def collate_fn(batches):
     latents = []
     prior_latents = []
@@ -260,45 +319,39 @@ def collate_fn(batches):
         'prior_class_prompt_ids': batches[0]['prior_class_prompt_ids']
     }
     
-data_loader = DataLoader(
+dataloader = DataLoader(
     dataset = dataset,
     batch_size = BATCH_SIZE,
     shuffle = False,
     collate_fn = lambda batches: collate_fn(batches)
 )
 
-### 4. Train
+# - Accelerator
+from accelerate import Accelerator
+accelerator = Accelerator()
+
 """
-    Train DreamBooth for a personalized Stable Diffusion
-
-    1. Args:
-    - start_from_epoch_no:
-        A number corresponding to a saved checkpoint. Training will start from that checkpoint.
-
-    2. Steps:
-        2.1. Encode <instance_prompt_ids>
-        2.2. Sample <timesteps>
-        2.2. For <latents: x0s> and <prior_latents: prior_x0s> :
-            - Sample <epss>
-            - Sample <xTs>
-            - Get <predicted_epss> by forwarding through <unet>
-            - Compute loss
-        2.3. Compute loss by adding <instance_loss> and weighted <prior_loss>
-        2.4. loss.backward() and optimizer.step()
+    2. Train DreamBooth for a personalized Stable Diffusion
+        Steps to train:
+            2.1. Encode <instance_prompt_ids>
+            2.2. Sample <timesteps>
+            2.2. For <latents: x0s> and <prior_latents: prior_x0s> :
+                - Sample <epss>
+                - Sample <xTs>
+                - Get <predicted_epss> by forwarding through <unet>
+                - Compute loss
+            2.3. Compute loss by adding <instance_loss> and weighted <prior_loss>
+            2.4. loss.backward() and optimizer.step()
 """
 
 # Set up
 text_encoder.train()
 unet.train()
 
-# Train loop
+# Train
 
-for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Training process", unit = ' epoch'):
-    print()
-    print(f"Start Epoch {epoch_no}")
-    
-    # Epoch loop
-    for batch_no, batch in tqdm.tqdm(enumerate(data_loader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
+for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Training process", unit = ' epoch'):    
+    for batch_no, batch in tqdm.tqdm(enumerate(dataloader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
         instance_prompt_ids = batch['instance_prompt_ids'].to(device)
         prior_class_prompt_ids = batch['prior_class_prompt_ids'].to(device)
         latents = batch['latents'].to(device)
@@ -328,7 +381,8 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
         )
 
         xTs = scheduler.add_noise(x0s, epss, timesteps)
-        print(batch_no, xTs.shape, timesteps.shape, encoded_instance_prompts.shape)
+
+        print(xTs.shape, timesteps.shape, encoded_instance_prompts.shape)
         predicted_epss = unet(xTs, timesteps, encoded_instance_prompts).sample
         instance_loss = F.mse_loss(predicted_epss, epss)
         
@@ -362,7 +416,7 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
 
     # Handle checkpoint saving
     if (epoch_no + 1) % 50 == 0:
-        checkpoints_folder_path = './db/model/checkpoints/'
+        checkpoints_folder_path = './model/checkpoints/'
         text_encoder_checkpoint_path = os.path.join(checkpoints_folder_path, f'text_encoder/checkpoint-{epoch_no + 1}')
         unet_checkpoint_path = os.path.join(checkpoints_folder_path, f'unet/checkpoint-{epoch_no + 1}')
 
