@@ -375,8 +375,15 @@ unet.train()
 
 # Train
 
-for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Training process", unit = ' epoch'):    
-    for batch_no, batch in tqdm.tqdm(enumerate(dataloader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
+progress_bar = tqdm.tqdm(
+    range(START_FROM_EPOCH_NO, NUM_EPOCHS), 
+    desc = "Training process", 
+    unit = ' epoch',
+    disable = not accelerator.is_local_main_process
+)
+
+for epoch_no in progress_bar:    
+    for batch_no, batch in enumerate(dataloader):
         with accelerator.accumulate(unet) and accelerator.accumulate(text_encoder):
             instance_prompt_ids = batch['instance_prompt_ids'].to(accelerator.device)
             prior_class_prompt_ids = batch['prior_class_prompt_ids'].to(accelerator.device)
@@ -408,7 +415,6 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
 
             xTs = scheduler.add_noise(x0s, epss, timesteps)
 
-            print(xTs.shape, timesteps.shape, encoded_instance_prompts.shape)
             predicted_epss = unet(xTs, timesteps, encoded_instance_prompts).sample
             instance_loss = F.mse_loss(predicted_epss, epss)
             
@@ -438,7 +444,7 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
             unet_optimizer.step()
 
             if batch_no % 3 == 0:
-                print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
+                accelerator.print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
 
     # Handle checkpoint saving
     if (epoch_no + 1) % 250 == 0:
@@ -448,6 +454,12 @@ for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Traini
 
         text_encoder.save_pretrained(text_encoder_checkpoint_path)
         unet.save_pretrained(unet_checkpoint_path)
+
+accelerator.wait_for_everyone()
+if accelerator.is_main_process:
+    print("Finish training")
+
+accelerator.end_training()
 
 if __name__ == "__main__":
     pass
