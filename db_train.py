@@ -165,12 +165,6 @@ vae = AutoencoderKL.from_pretrained(
 
 vae.requires_grad_(False)
 
-# - Whole pipeline as a prior model
-print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
-prior_model = StableDiffusionPipeline.from_pretrained(
-    pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
-).to(accelerator.device)
-
 # - Text encoder: 
 print(f"- Loading <text_encoder> from '{pretrained_model}'")
 text_encoder = CLIPTextModel.from_pretrained(
@@ -192,7 +186,7 @@ unet = UNet2DConditionModel.from_pretrained(
 from torch.utils.data import Dataset
 
 class LatentsDataset(Dataset):
-    def __init__(self, instances_folder_path, instance_prompt, prior_model, image_encoder, size):
+    def __init__(self, instances_folder_path, instance_prompt, image_encoder, size):
         def get_prior_class_prompt(instance_prompt, identifier):
             try:
                 assert identifier in instance_prompt
@@ -256,18 +250,28 @@ class LatentsDataset(Dataset):
             return_tensors = "pt",
         ).input_ids
 
+        print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
+        prior_model = StableDiffusionPipeline.from_pretrained(
+            pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
+        ).to(accelerator.device)
+
         print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         prior_class_images = []
-        NUM_PRIOR_IMAGES = 1
+        NUM_PRIOR_IMAGES = 10
         for i in range(NUM_PRIOR_IMAGES):
-            prior_class_images += prior_model([self.prior_class_prompt], num_inference_steps = 10).images
-        #prior_class_images[0].show()
+            prior_class_images += prior_model([self.prior_class_prompt], num_inference_steps = 25).images
+        prior_class_images[0].show()
 
         self.prior_class_instances = [pre_process(image).to(accelerator.device) for image in prior_class_images]
         with torch.no_grad():
             self.prior_latent_dicts = [image_encoder.encode(instance.unsqueeze(0)).latent_dist for instance in self.prior_class_instances]
 
         self.num_prior_class_instances = len(self.prior_class_instances)
+
+        print("- Deleting <prior_model> to save GPU memory")
+        del prior_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         
     def __getitem__(self, index):
@@ -285,12 +289,9 @@ class LatentsDataset(Dataset):
 dataset = LatentsDataset(
     instances_folder_path = INSTANCE_FOLDER_PATH,
     instance_prompt = PROMPT,
-    prior_model = prior_model,
     image_encoder = vae,
     size = 512
 )
-
-prior_model.to('cpu')
 
 # 1.4.
 
