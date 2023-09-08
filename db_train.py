@@ -27,6 +27,13 @@ BATCH_SIZE = 1
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"main(): Device: {device}")
 
+# - Accelerator
+from accelerate import Accelerator
+accelerator = Accelerator(
+    gradient_accumulation_steps = 3,
+    mixed_precision = 'fp16'
+)
+
 """
     1. Setting up: 
     1.1. Prepare the folders if not yet done for training and inference, including:
@@ -154,7 +161,7 @@ print(f"- Loading <vae> from '{PRETRAINED_MODEL_NAME}', subfolder 'vae'")
 vae = AutoencoderKL.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'vae'
-).to(device)
+).to(accelerator.device)
 
 vae.requires_grad_(False)
 
@@ -162,14 +169,14 @@ vae.requires_grad_(False)
 print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
 prior_model = StableDiffusionPipeline.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
-).to(device)
+).to(accelerator.device)
 
 # - Text encoder: 
 print(f"- Loading <text_encoder> from '{pretrained_model}'")
 text_encoder = CLIPTextModel.from_pretrained(
     pretrained_model_name_or_path = pretrained_model,
     subfolder = 'text_encoder'
-)
+).to(accelerator.device)
 
 # if not FINETUNE_TEXT_ENCODER:
 #     text_encoder.requires_grad_(False)
@@ -179,7 +186,7 @@ print(f"- Loading <unet> from '{pretrained_model}', subfolder 'unet'")
 unet = UNet2DConditionModel.from_pretrained(
     pretrained_model_name_or_path = pretrained_model,
     subfolder = 'unet'
-)
+).to(accelerator.device)
 
 # 1.3.
 from torch.utils.data import Dataset
@@ -211,7 +218,7 @@ class LatentsDataset(Dataset):
             padding = "max_length",
             max_length = tokenizer.model_max_length,
             return_tensors = "pt",
-        ).to(device).input_ids
+        ).to(accelerator.device).input_ids
 
         pre_process = transforms.Compose(
             [
@@ -227,7 +234,7 @@ class LatentsDataset(Dataset):
         for file in files:
             file_path = os.path.join(instances_folder_path, file)
             image = Image.open(file_path)
-            processed_image = pre_process(image).to(device)
+            processed_image = pre_process(image).to(accelerator.device)
             instances.append(processed_image)
 
         self.instances = instances
@@ -256,7 +263,7 @@ class LatentsDataset(Dataset):
             prior_class_images += prior_model([self.prior_class_prompt], num_inference_steps = 10).images
         #prior_class_images[0].show()
 
-        self.prior_class_instances = [pre_process(image).to(device) for image in prior_class_images]
+        self.prior_class_instances = [pre_process(image).to(accelerator.device) for image in prior_class_images]
         with torch.no_grad():
             self.prior_latent_dicts = [image_encoder.encode(instance.unsqueeze(0)).latent_dist for instance in self.prior_class_instances]
 
@@ -327,13 +334,6 @@ dataloader = DataLoader(
     batch_size = BATCH_SIZE,
     shuffle = False,
     collate_fn = lambda batches: collate_fn(batches)
-)
-
-# - Accelerator
-from accelerate import Accelerator
-accelerator = Accelerator(
-    gradient_accumulation_steps = 3,
-    mixed_precision = 'fp16'
 )
 
 (unet,
