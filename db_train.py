@@ -290,6 +290,8 @@ dataset = LatentsDataset(
     size = 512
 )
 
+prior_model.to('cpu')
+
 # 1.4.
 
 # - Optimizers
