@@ -24,7 +24,7 @@ UNET_CHECKPOINT_FOLDER_PATH = "./model/checkpoints/unet/"
 START_FROM_EPOCH_NO = 0
 BATCH_SIZE = 1
 
-# Dataset
+# Dataset definition
 from torch.utils.data import Dataset
 
 class LatentsDataset(Dataset):
@@ -59,9 +59,12 @@ class DBDataset(Dataset):
     
     def __len__(self):
         return len(self.instance_dataset)
-    
+
+
 def main():
-    # - Accelerator
+    """
+        1. Create accelerator object
+    """
     from accelerate import Accelerator
     accelerator = Accelerator(
         gradient_accumulation_steps = 3,
@@ -69,8 +72,69 @@ def main():
     )
 
     """
-        Prepare dataset on main process only
+        2. Create necessary directories for saving data and checkpoints
+            - On main process only
+            - If they already exist, no changes
+    """
+    def make_structured_dir(root_path, structured_dir_info):
+        """
+            1. Args:
+            - root_path: str
+                A path where the dir should be created
+
+            - structured_dir_info: dict
+                Represents the structure of the dir
+        """
+
+        for dir, sub_dir in structured_dir_info.items():
+            dir_path = os.path.join(root_path, dir)
+            os.makedirs(dir_path, exist_ok = True)
+            make_structured_dir(dir_path, sub_dir)
+
+    if accelerator.is_main_process:
+        accelerator.print(f"main_process - main(): Creating './model/...' for saving checkpoints ...")
+
+        model_dir_info = {
+            'model': {
+                'checkpoints': {
+                    'text_encoder': {},
+                    'unet': {}
+                }
+            }
+        }
+
+        make_structured_dir(
+            root_path = './',
+            structured_dir_info = model_dir_info
+        )
+
+        accelerator.print(f"main_process - main(): Creating './data/...' for storing data ...")
+
+        data_dir_info = {
+            'data': {
+                'valid': {
+                    'instances': {},
+                    'prior_class_instances': {}
+                },
+                'invalid': {}
+            }
+        }
+
+        make_structured_dir(
+            root_path = './',
+            structured_dir_info = data_dir_info
+        )
+
+        accelerator.print(f"- Note: Put your instances into './data/valid/instances/' for training if you haven't. The invalid ones will be moved to './data/invalid/' automatically.")
+
+        accelerator.print()
+
+    accelerator.wait_for_everyone()
+    
+    """
+        3. Prepare dataset on main process only
     """  
+    accelerator.print(f"main_process - main(): Preparing dataset ...")
     def get_prior_class_prompt(instance_prompt, identifier):
         try:
             assert identifier in instance_prompt
@@ -78,13 +142,13 @@ def main():
         except AssertionError as e:
             raise RuntimeError("at get_prior_prompt(): no -identifier- in -prompt-")
         
-    if accelerator.is_main_process:        
+    if accelerator.is_main_process:
+        accelerator.print(f"- Loading <tokenizer> from {PRETRAINED_MODEL_NAME}, subfolder 'tokenizer'")     
         tokenizer = CLIPTokenizer.from_pretrained(
             pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
             subfolder = 'tokenizer'
         )
 
-        # - Autoencoders
         accelerator.print(f"- Loading <vae> from '{PRETRAINED_MODEL_NAME}', subfolder 'vae'")
         vae = AutoencoderKL.from_pretrained(
             pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
@@ -92,6 +156,11 @@ def main():
         ).to(accelerator.device)
 
         vae.requires_grad_(False)
+
+        print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
+        prior_model = StableDiffusionPipeline.from_pretrained(
+            pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
+        ).to(accelerator.device)
 
         pre_process = transforms.Compose(
             [
@@ -101,6 +170,9 @@ def main():
             ]
         )
         
+        scaling_factor = vae.config.scaling_factor
+
+        accelerator.print(f"- Loading and processing instances for training in './data/valid/instances'") 
         instance_prompt_ids = tokenizer(
             PROMPT,
             truncation = True,
@@ -109,7 +181,6 @@ def main():
             return_tensors = "pt",
         ).to(accelerator.device).input_ids        
 
-        print("- Loading instances")
         instances = []
         files = os.listdir(INSTANCE_FOLDER_PATH)
         for file in files:
@@ -118,11 +189,9 @@ def main():
             processed_image = pre_process(image).to(accelerator.device)
             instances.append(processed_image)
 
-        print("- Encoding instances to latent space")
         with torch.no_grad():
             latent_dists = [vae.encode(instance.unsqueeze(0)).latent_dist for instance in instances]
 
-        scaling_factor = vae.config.scaling_factor
         latents = [latent_dist.sample() * scaling_factor for latent_dist in latent_dists]
 
         instance_dataset = LatentsDataset(
@@ -130,6 +199,7 @@ def main():
             prompt_ids = instance_prompt_ids
         )
 
+        accelerator.print(f"- Generating and processing prior_class_instances for training")
         prior_class_prompt = get_prior_class_prompt(PROMPT, 'sks')
         prior_class_prompt_ids = tokenizer(
             prior_class_prompt,
@@ -139,12 +209,6 @@ def main():
             return_tensors = "pt",
         ).to(accelerator.device).input_ids
         
-        print(f"- Loading <prior_model> from '{PRETRAINED_MODEL_NAME}'")
-        prior_model = StableDiffusionPipeline.from_pretrained(
-            pretrained_model_name_or_path = PRETRAINED_MODEL_NAME
-        ).to(accelerator.device)
-
-        print("- Generating and encoding prior_class_instances to latent space for prior preservation training")
         prior_class_images = []
         NUM_PRIOR_IMAGES = 1
         for i in range(NUM_PRIOR_IMAGES):
@@ -162,10 +226,12 @@ def main():
             prompt_ids = prior_class_prompt_ids
         )
 
+        accelerator.print(f"- Cleaning up pipelines and models")
         del vae, prior_model, tokenizer
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        accelerator.print(f"- Finishing the dataset")
         dataset = DBDataset(
             instance_dataset = instance_dataset,
             prior_dataset = prior_dataset
@@ -214,56 +280,7 @@ def main():
 
     # 1.
     # 1.1.
-    accelerator.print(f"main(): Creating './model/...' for saving checkpoints ...")
-
-    def make_structured_dir(root_path, structured_dir_info):
-        """
-            1. Args:
-            - root_path: str
-                A path where the dir should be created
-
-            - structured_dir_info: dict
-                Represents the structure of the dir
-        """
-
-        for dir, sub_dir in structured_dir_info.items():
-            dir_path = os.path.join(root_path, dir)
-            os.makedirs(dir_path, exist_ok = True)
-            make_structured_dir(dir_path, sub_dir)
-
-    model_dir_info = {
-        'model': {
-            'checkpoints': {
-                'text_encoder': {},
-                'unet': {}
-            }
-        }
-    }
-
-    make_structured_dir(
-        root_path = './',
-        structured_dir_info = model_dir_info
-    )
-
-    accelerator.print(f"main(): Creating './data/...' for storing data ...")
-
-    data_dir_info = {
-        'data': {
-            'valid': {
-                'instances': {},
-                'prior_class_instances': {}
-            },
-            'invalid': {}
-        }
-    }
-
-    make_structured_dir(
-        root_path = './',
-        structured_dir_info = data_dir_info
-    )
-
-    accelerator.print(f"    - Note: Put your instances into './data/valid/instances/' for training if you haven't. The invalid ones will be moved to './data/invalid/' automatically.")
-    accelerator.print()
+    
 
     # 1.2. 
     accelerator.print(f"main(): Preparing pipeline ...")
@@ -462,4 +479,4 @@ def main():
     accelerator.end_training()
 
 if __name__ == "__main__":
-    pass
+    main()
