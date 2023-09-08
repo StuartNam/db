@@ -130,7 +130,7 @@ def main():
         accelerator.print()
 
     accelerator.wait_for_everyone()
-    
+
     """
         3. Prepare dataset on main process only
     """  
@@ -406,7 +406,7 @@ def main():
                 unet_optimizer.zero_grad()
                 
                 instance_prompt_ids = batch['instance_prompt_ids']
-                prior_class_prompt_ids = batch['prior_class_prompt_ids']
+                prior_class_prompt_ids = batch['prior_prompt_ids']
                 latents = batch['latents']
                 prior_latents = batch['prior_latents']
 
