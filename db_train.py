@@ -154,7 +154,7 @@ print(f"- Loading <vae> from '{PRETRAINED_MODEL_NAME}', subfolder 'vae'")
 vae = AutoencoderKL.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'vae'
-)
+).to(device)
 
 vae.requires_grad_(False)
 
