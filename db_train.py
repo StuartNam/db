@@ -154,7 +154,7 @@ print(f"- Loading <vae> from '{PRETRAINED_MODEL_NAME}', subfolder 'vae'")
 vae = AutoencoderKL.from_pretrained(
     pretrained_model_name_or_path = PRETRAINED_MODEL_NAME,
     subfolder = 'vae'
-).to(device)
+)
 
 vae.requires_grad_(False)
 
@@ -169,7 +169,7 @@ print(f"- Loading <text_encoder> from '{pretrained_model}'")
 text_encoder = CLIPTextModel.from_pretrained(
     pretrained_model_name_or_path = pretrained_model,
     subfolder = 'text_encoder'
-).to(device)
+)
 
 # if not FINETUNE_TEXT_ENCODER:
 #     text_encoder.requires_grad_(False)
@@ -179,7 +179,7 @@ print(f"- Loading <unet> from '{pretrained_model}', subfolder 'unet'")
 unet = UNet2DConditionModel.from_pretrained(
     pretrained_model_name_or_path = pretrained_model,
     subfolder = 'unet'
-).to(device)
+)
 
 # 1.3.
 from torch.utils.data import Dataset
@@ -331,7 +331,23 @@ dataloader = DataLoader(
 
 # - Accelerator
 from accelerate import Accelerator
-accelerator = Accelerator()
+accelerator = Accelerator(
+    gradient_accumulation_steps = 3,
+    mixed_precision = 'fp16'
+)
+
+(unet,
+ text_encoder,
+ dataloader,
+ unet_optimizer,
+ text_encoder_optimizer
+) = accelerator.prepare(
+    unet,
+    text_encoder,
+    dataloader,
+    unet_optimizer,
+    text_encoder_optimizer
+)
 
 """
     2. Train DreamBooth for a personalized Stable Diffusion
@@ -348,6 +364,10 @@ accelerator = Accelerator()
 """
 
 # Set up
+text_encoder.to(accelerator.device)
+unet.to(accelerator.device)
+vae.to(accelerator.device)
+
 text_encoder.train()
 unet.train()
 
@@ -355,67 +375,68 @@ unet.train()
 
 for epoch_no in tqdm.tqdm(range(START_FROM_EPOCH_NO, NUM_EPOCHS), desc = "Training process", unit = ' epoch'):    
     for batch_no, batch in tqdm.tqdm(enumerate(dataloader), desc = f"Epoch {epoch_no + 1}", unit = ' batch'):
-        instance_prompt_ids = batch['instance_prompt_ids'].to(device)
-        prior_class_prompt_ids = batch['prior_class_prompt_ids'].to(device)
-        latents = batch['latents'].to(device)
-        prior_latents = batch['prior_latents'].to(device)
+        with accelerator.accumulate(unet) and accelerator.accumulate(text_encoder):
+            instance_prompt_ids = batch['instance_prompt_ids'].to(accelerator.device)
+            prior_class_prompt_ids = batch['prior_class_prompt_ids'].to(accelerator.device)
+            latents = batch['latents'].to(accelerator.device)
+            prior_latents = batch['prior_latents'].to(accelerator.device)
 
-        encoded_instance_prompt = text_encoder(instance_prompt_ids)[0]
-        encoded_instance_prompts = torch.cat([encoded_instance_prompt] * latents.shape[0], dim = 0)
-        x0s = latents
-        
-        # - Sample white noise <epss> to add to x0
-        epss = torch.randn_like(
-            input = x0s,
-            dtype = x0s.dtype,
-            device = x0s.device
-        )
+            encoded_instance_prompt = text_encoder(instance_prompt_ids)[0]
+            encoded_instance_prompts = torch.cat([encoded_instance_prompt] * latents.shape[0], dim = 0)
+            x0s = latents
+            
+            # - Sample white noise <epss> to add to x0
+            epss = torch.randn_like(
+                input = x0s,
+                dtype = x0s.dtype,
+                device = x0s.device
+            )
 
-        # - Sample <timesteps> T randomly
-        ### Warning: <low> maybe 0
-        ### 
-        ###
-        timesteps = torch.randint(
-            low = 1,
-            high = scheduler.config.num_train_timesteps,
-            size = (x0s.shape[0], ),
-            dtype = torch.long,
-            device = x0s.device
-        )
+            # - Sample <timesteps> T randomly
+            ### Warning: <low> maybe 0
+            ### 
+            ###
+            timesteps = torch.randint(
+                low = 1,
+                high = scheduler.config.num_train_timesteps,
+                size = (x0s.shape[0], ),
+                dtype = torch.long,
+                device = x0s.device
+            )
 
-        xTs = scheduler.add_noise(x0s, epss, timesteps)
+            xTs = scheduler.add_noise(x0s, epss, timesteps)
 
-        print(xTs.shape, timesteps.shape, encoded_instance_prompts.shape)
-        predicted_epss = unet(xTs, timesteps, encoded_instance_prompts).sample
-        instance_loss = F.mse_loss(predicted_epss, epss)
-        
-        prior_x0s = prior_latents
+            print(xTs.shape, timesteps.shape, encoded_instance_prompts.shape)
+            predicted_epss = unet(xTs, timesteps, encoded_instance_prompts).sample
+            instance_loss = F.mse_loss(predicted_epss, epss)
+            
+            prior_x0s = prior_latents
 
-        encoded_prior_class_prompt = text_encoder(prior_class_prompt_ids)[0]
-        encoded_instance_prompts = torch.cat([encoded_prior_class_prompt] * BATCH_SIZE, dim = 0)
+            encoded_prior_class_prompt = text_encoder(prior_class_prompt_ids)[0]
+            encoded_instance_prompts = torch.cat([encoded_prior_class_prompt] * BATCH_SIZE, dim = 0)
 
-        prior_epss = torch.randn_like(
-            input = prior_x0s,
-            dtype = prior_x0s.dtype,
-            device = prior_x0s.device
-        )
+            prior_epss = torch.randn_like(
+                input = prior_x0s,
+                dtype = prior_x0s.dtype,
+                device = prior_x0s.device
+            )
 
-        prior_xTs = scheduler.add_noise(prior_x0s, prior_epss, timesteps)
-        predicted_prior_epss = unet(prior_xTs, timesteps, encoded_prior_class_prompt).sample
-        prior_loss = F.mse_loss(predicted_prior_epss, prior_epss)
+            prior_xTs = scheduler.add_noise(prior_x0s, prior_epss, timesteps)
+            predicted_prior_epss = unet(prior_xTs, timesteps, encoded_prior_class_prompt).sample
+            prior_loss = F.mse_loss(predicted_prior_epss, prior_epss)
 
-        loss = instance_loss + PRIOR_LOSS_WEIGHT * prior_loss
+            loss = instance_loss + PRIOR_LOSS_WEIGHT * prior_loss
 
-        text_encoder_optimizer.zero_grad()
-        unet_optimizer.zero_grad()
+            text_encoder_optimizer.zero_grad()
+            unet_optimizer.zero_grad()
 
-        loss.backward()
+            accelerator.backward(loss)
 
-        text_encoder_optimizer.step()
-        unet_optimizer.step()
+            text_encoder_optimizer.step()
+            unet_optimizer.step()
 
-        if batch_no % 3 == 0:
-            print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
+            if batch_no % 3 == 0:
+                print(f"- Batch {batch_no}: Loss = {loss.detach().item()}" )
 
     # Handle checkpoint saving
     if (epoch_no + 1) % 250 == 0:
